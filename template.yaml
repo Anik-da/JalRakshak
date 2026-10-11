@@ -1,0 +1,372 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  JalRakshak AI — Community Flood Intelligence & Safer Mobility Platform
+  WeMakeDevs Environmental Hacks 2026 (Heat & Water Track)
+  Infrastructure as Code (AWS SAM)
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment stage.
+  AppDomainName:
+    Type: String
+    Default: ""
+    Description: Optional Route53 custom domain name.
+
+Globals:
+  Function:
+    Timeout: 15
+    MemorySize: 256
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        REPORTS_TABLE_NAME: !Ref ReportsTable
+        AUDIT_TABLE_NAME: !Ref AuditLogsTable
+        WEATHER_CACHE_TABLE_NAME: !Ref WeatherCacheTable
+        REPORT_IMAGES_BUCKET: !Ref ReportImagesBucket
+        USER_POOL_ID: !Ref CognitoUserPool
+        USER_POOL_CLIENT_ID: !Ref CognitoUserPoolClient
+        USER_ALERTS_TABLE_NAME: !Ref UserAlertsTable
+        FEEDBACK_TABLE_NAME: !Ref PredictionFeedbackTable
+        BEDROCK_MODEL_ID: "anthropic.claude-3-haiku-20240307-v1:0"
+        PUBLIC_APP_ORIGIN: !GetAtt FrontendBucket.WebsiteURL
+
+Resources:
+  # ==========================================
+  # COGNITO AUTHENTICATION
+  # ==========================================
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "jalrakshak-users-${Environment}"
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "jalrakshak-web-client-${Environment}"
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  CognitoAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Admins
+      Description: Municipal moderators and civic flood administrators
+      UserPoolId: !Ref CognitoUserPool
+
+  # ==========================================
+  # DYNAMODB TABLES
+  # ==========================================
+  ReportsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "JalRakshak-Reports-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: reportId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: submittedAt
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: reportId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: submittedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: UserIdIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: submittedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  AuditLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "JalRakshak-Audit-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: auditId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: auditId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+
+  WeatherCacheTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "JalRakshak-WeatherCache-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: locationKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: locationKey
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  UserAlertsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "JalRakshak-UserAlerts-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  PredictionFeedbackTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "JalRakshak-PredictionFeedback-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: feedbackId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: feedbackId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  # ==========================================
+  # S3 STORAGE
+  # ==========================================
+  ReportImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "jalrakshak-report-images-${Environment}-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [PUT]
+            AllowedOrigins: ["*"]
+            MaxAge: 3600
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "jalrakshak-frontend-${Environment}-${AWS::AccountId}"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+
+  # ==========================================
+  # API GATEWAY (HTTP API)
+  # ==========================================
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      CorsConfiguration:
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+        AllowHeaders: [Content-Type, Authorization, X-User-Id, X-User-Role, X-User-Email]
+        AllowOrigins:
+          - "http://localhost:5173"
+          - "*"
+        MaxAge: 3600
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              audience:
+                - !Ref CognitoUserPoolClient
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+
+  # ==========================================
+  # LAMBDA BACKEND FUNCTION
+  # ==========================================
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambdaHandler.handler
+      CodeUri: ./backend/dist/
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReportsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AuditLogsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WeatherCacheTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserAlertsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PredictionFeedbackTable
+        - S3CrudPolicy:
+            BucketName: !Ref ReportImagesBucket
+        - Statement:
+            - Sid: BedrockInferencePolicy
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+            - Sid: SnsPublishPolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: "*"
+            - Sid: SesSendEmailPolicy
+              Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        PublicRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/v1/{proxy+}
+            Method: ANY
+        WeatherCacheCron:
+          Type: Schedule
+          Properties:
+            Schedule: rate(30 minutes)
+            Name: !Sub "jalrakshak-weather-refresh-${Environment}"
+            Description: Periodic EventBridge scheduled weather ingestion & cache warming
+            Enabled: true
+
+  # ==========================================
+  # AMAZON SQS DEAD-LETTER QUEUE (DLQ)
+  # ==========================================
+  NotificationDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "jalrakshak-notification-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600 # 14 days
+      VisibilityTimeout: 300
+
+  # ==========================================
+  # AMAZON CLOUDFRONT CDN DISTRIBUTION
+  # ==========================================
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "JalRakshak AI CDN - ${Environment}"
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3FrontendOrigin
+            DomainName: !Select [2, !Split ["/", !GetAtt FrontendBucket.WebsiteURL]]
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          TargetOriginId: S3FrontendOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+
+Outputs:
+  HttpApiUrl:
+    Description: HTTP API Gateway Endpoint URL
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+  CognitoUserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !Ref CognitoUserPoolClient
+  FrontendWebsiteUrl:
+    Description: S3 Static Website Application URL
+    Value: !GetAtt FrontendBucket.WebsiteURL
+  CloudFrontDomain:
+    Description: Amazon CloudFront Global CDN Domain URL
+    Value: !GetAtt CloudFrontDistribution.DomainName
+  NotificationDeadLetterQueueUrl:
+    Description: Amazon SQS Dead-Letter Queue URL
+    Value: !Ref NotificationDeadLetterQueue
+  FrontendBucketName:
+    Description: S3 Bucket Name for Frontend Assets
+    Value: !Ref FrontendBucket
+  ReportImagesBucketName:
+    Description: S3 Bucket Name for Report Images
+    Value: !Ref ReportImagesBucket
+

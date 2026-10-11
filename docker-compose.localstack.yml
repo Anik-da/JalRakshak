@@ -1,0 +1,44 @@
+version: '3.8'
+
+# ==============================================================================
+# JalRakshak AI — LocalStack AWS Cloud Emulator
+# Open Source AWS Cloud Mock (No AWS account, no card, no bill)
+# ==============================================================================
+
+services:
+  localstack:
+    container_name: jalrakshak-localstack
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"            # LocalStack Gateway
+      - "4510-4559:4510-4559"  # External service port range
+    environment:
+      - SERVICES=dynamodb,s3,ses,sns,events,cognito-idp,opensearch
+      - AWS_DEFAULT_REGION=ap-south-1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - DEBUG=1
+    volumes:
+      - "${LOCALSTACK_VOLUME_DIR:-./.localstack}:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init-aws.sh"
+
+  opensearch:
+    container_name: jalrakshak-opensearch
+    image: opensearchproject/opensearch:2.11.0
+    environment:
+      - cluster.name=jalrakshak-cluster
+      - node.name=jalrakshak-node
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "DISABLE_SECURITY_PLUGIN=true"
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536

@@ -1,0 +1,8 @@
+# ==============================================================================
+# AWS Finch Configuration
+# Open source container development tool by AWS
+# ==============================================================================
+cpus: 4
+memory: 4GiB
+snapshotters:
+  - overlayfs
